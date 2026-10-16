@@ -5,17 +5,12 @@ import numpy as np
 import math
 import random
 import time
-from collections import deque
+from magic_control import HandMagic, get_gesture
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
 WIDTH, HEIGHT = 1280, 720
-SMOOTHING = 0.45
-MAX_TRAIL = 600
-MIN_RADIUS = 45
-MAX_RADIUS = 600
-DRAW_GRACE = 0.4
 
 # BGR colors
 ORANGE = (0, 140, 255)
@@ -41,126 +36,8 @@ options = HandLandmarkerOptions(
     min_tracking_confidence=0.5
 )
 
-hands = {
-    "Left": {
-        "trail": deque(maxlen=MAX_TRAIL),
-        "smooth": None,
-        "last_seen": 0,
-        "last_draw": 0,
-        "cooldown": 0,
-        "drawing": False
-    },
-    "Right": {
-        "trail": deque(maxlen=MAX_TRAIL),
-        "smooth": None,
-        "last_seen": 0,
-        "last_draw": 0,
-        "cooldown": 0,
-        "drawing": False
-    }
-}
-
-# One summoned magic circle per hand; drawing and palm tracking are independent.
-portals = {}
+hands = {label: HandMagic() for label in ("Left", "Right")}
 particles = []
-
-
-def follow_hand(magic, palm, dt):
-    """Ease toward the palm at the same speed across different frame rates."""
-    alpha = 1 - math.exp(-18 * max(0, dt))
-    magic["center"] = tuple(
-        current + alpha * (target - current)
-        for current, target in zip(magic["center"], palm)
-    )
-
-
-def keep_drawing(state, gesture, now):
-    """Keep an unfinished loop through short pose slips; fists still stop."""
-    if gesture == "DRAW":
-        if now - state["last_draw"] > DRAW_GRACE:
-            state["trail"].clear()
-            state["smooth"] = None
-            state["drawing"] = False
-        state["last_draw"] = now
-        return True
-    if gesture == "FIST" or now - state["last_draw"] > DRAW_GRACE:
-        state["drawing"] = False
-        state["trail"].clear()
-        state["smooth"] = None
-    return False
-
-# ==========================================
-# HAND GESTURE RECOGNITION
-# ==========================================
-def finger_extended(hand, tip, pip):
-    wrist = hand[0]
-    tip_dist = math.hypot(
-        hand[tip].x - wrist.x,
-        hand[tip].y - wrist.y
-    )
-    pip_dist = math.hypot(
-        hand[pip].x - wrist.x,
-        hand[pip].y - wrist.y
-    )
-    return tip_dist > pip_dist * 1.12
-
-
-def get_gesture(hand):
-    index = finger_extended(hand, 8, 6)
-    middle = finger_extended(hand, 12, 10)
-    ring = finger_extended(hand, 16, 14)
-    pinky = finger_extended(hand, 20, 18)
-
-    if not any([index, middle, ring, pinky]):
-        return "FIST"
-
-    if index and not middle and not ring and not pinky:
-        return "DRAW"
-
-    return "IDLE"
-
-
-# ==========================================
-# CIRCLE DETECTION
-# ==========================================
-def detect_circle(points):
-    if len(points) < 35:
-        return None
-
-    arr = np.array(points, dtype=np.float32)
-    center = np.mean(arr, axis=0)
-
-    distances = np.linalg.norm(arr - center, axis=1)
-    radius = float(np.mean(distances))
-
-    if not MIN_RADIUS <= radius <= MAX_RADIUS:
-        return None
-
-    if np.std(distances) / radius > 0.25:
-        return None
-
-    # Start and end should be near each other
-    if np.linalg.norm(arr[0] - arr[-1]) > radius * 0.65:
-        return None
-
-    angles = np.unwrap(
-        np.arctan2(
-            arr[:, 1] - center[1],
-            arr[:, 0] - center[0]
-        )
-    )
-
-    rotation = abs(angles[-1] - angles[0])
-
-    if not 5.2 <= rotation <= 8.5:
-        return None
-
-    return (
-        int(center[0]),
-        int(center[1]),
-        int(radius)
-    )
-
 
 # ==========================================
 # MAGIC PARTICLES
@@ -363,87 +240,22 @@ with HandLandmarker.create_from_options(options) as landmarker:
             active_hands.add(label)
             state = hands[label]
 
-            gesture = get_gesture(hand)
+            gesture = get_gesture(hand, width, height)
             gestures[label] = gesture
-
-            state["last_seen"] = now
-
-            # Follow the palm even for a fist/open hand, before drawing logic.
-            if label in portals:
-                palm = (
-                    sum(hand[j].x for j in (0, 5, 9, 13, 17)) / 5 * width,
-                    sum(hand[j].y for j in (0, 5, 9, 13, 17)) / 5 * height
-                )
-                follow_hand(portals[label], palm, dt)
-                state["trail"].clear()
-                state["smooth"] = None
-                state["drawing"] = False
-                continue
-
-            if not keep_drawing(state, gesture, now):
-                continue
-
-            tip = hand[8]
-            x = int(tip.x * width)
-            y = int(tip.y * height)
-
-            if state["smooth"] is None:
-                state["smooth"] = (float(x), float(y))
-            else:
-                sx, sy = state["smooth"]
-
-                state["smooth"] = (
-                    sx + SMOOTHING * (x - sx),
-                    sy + SMOOTHING * (y - sy)
-                )
-
-            point = (
-                int(state["smooth"][0]),
-                int(state["smooth"][1])
+            palm = (
+                sum(hand[j].x for j in (0, 5, 9, 13, 17)) / 5 * width,
+                sum(hand[j].y for j in (0, 5, 9, 13, 17)) / 5 * height
             )
+            point = state.update(
+                gesture, (hand[8].x * width, hand[8].y * height), palm,
+                now, dt, (width, height)
+            )
+            if point is not None:
+                fingertips[label] = point
 
-            state["last_seen"] = now
-
-            # --------------------------------
-            # INDEX FINGER = START DRAWING
-            # --------------------------------
-            if not state["drawing"]:
-                state["trail"].clear()
-                state["drawing"] = True
-
-            trail = state["trail"]
-
-            if trail:
-                distance = math.dist(point, trail[-1])
-
-                if distance > max(100, math.hypot(width, height) * 0.2):
-                    trail.clear()
-
-            trail.append(point)
-            fingertips[label] = point
-
-            # Detect circle
-            if now > state["cooldown"]:
-                circle = detect_circle(list(trail))
-
-                if circle:
-                    cx, cy, radius = circle
-                    portals[label] = {
-                        "center": (float(cx), float(cy)),
-                        "radius": radius
-                    }
-                    trail.clear()
-                    state["cooldown"] = now + 2.0
-
-        # ==================================
-        # HANDLE LOST HANDS
-        # ==================================
         for label, state in hands.items():
             if label not in active_hands:
-                if now - state["last_seen"] > DRAW_GRACE:
-                    state["trail"].clear()
-                    state["smooth"] = None
-                    state["drawing"] = False
+                state.lost(now)
 
         # ==================================
         # RENDER MAGIC EFFECTS
@@ -452,7 +264,7 @@ with HandLandmarker.create_from_options(options) as landmarker:
 
         # Draw finger trails
         for state in hands.values():
-            points = list(state["trail"])
+            points = list(state.trail)
 
             for j in range(1, len(points)):
                 cv2.line(
@@ -465,10 +277,10 @@ with HandLandmarker.create_from_options(options) as landmarker:
         # Draw portals
         elapsed = now - start_time
 
-        for label, magic in portals.items():
-            # Hide when tracking is lost; resume on the same hand's return.
-            if now - hands[label]["last_seen"] > 0.15:
+        for state in hands.values():
+            if not state.visible(now):
                 continue
+            magic = state.magic
             cx, cy = magic["center"]
             draw_magic_portal(
                 magic_layer, (round(cx), round(cy), magic["radius"]), elapsed
@@ -525,7 +337,7 @@ with HandLandmarker.create_from_options(options) as landmarker:
 
         cv2.putText(
             frame,
-            "Draw circle: SUMMON | Move hand: CARRY MAGIC",
+            "Draw: SUMMON | Open hand: HOLD | Fist: DISMISS",
             (20, 75),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6, (255, 255, 255), 2
@@ -541,7 +353,7 @@ with HandLandmarker.create_from_options(options) as landmarker:
 
         cv2.putText(
             frame,
-            f"Summoned Magic Circles: {len(portals)} / 2",
+            f"Summoned Magic Circles: {sum(s.magic is not None for s in hands.values())} / 2",
             (20, 135),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6, GOLD, 2
@@ -564,14 +376,9 @@ with HandLandmarker.create_from_options(options) as landmarker:
             break
 
         if key == ord("c"):
-            portals.clear()
             particles.clear()
-
             for state in hands.values():
-                state["trail"].clear()
-                state["smooth"] = None
-                state["drawing"] = False
-                state["last_draw"] = 0
+                state.clear()
 
 cap.release()
 cv2.destroyAllWindows()

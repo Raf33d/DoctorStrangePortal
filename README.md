@@ -14,15 +14,28 @@ Set-Location D:\DoctorStrangePortal
 
 Extend only your index finger and draw a circle to create the magic effect.
 Both hands work independently, with one magic circle per hand. After summoning,
-move your hand to carry the circle; it follows your palm even when you make a fist
-or open your hand. Drawing stops once that hand has a circle. The circle hides when
+open and move your hand to carry the circle. Close your fist for about 0.18 seconds
+to dismiss that hand's circle, then extend your index finger to draw again immediately.
+Drawing stops once that hand has a circle. The circle hides when
 the hand leaves view and resumes following when that hand returns.
 Press C to clear everything and draw new circles; press Q to quit.
 
 Large circles are supported up to a 600-pixel radius, with a longer drawing
-history for slower loops. Brief pose or tracking slips of up to 0.4 seconds
-preserve the unfinished drawing. A fist still stops drawing immediately.
+history for slower loops. Brief pose or tracking slips of up to 0.6 seconds
+preserve the unfinished drawing. A confirmed fist clears the unfinished drawing too.
 Keep your fingertip inside the camera frame throughout the loop.
+
+Drawing uses rotation-independent finger joint angles, allows a slightly extended
+second finger, and filters isolated position jumps. Adaptive smoothing reduces
+jitter while following faster motion. Circle fitting uses evenly spaced path
+samples so pauses and uneven drawing speeds do not bias its center; short lead-ins
+are tolerated, while partial circles, straight lines and retraced arcs are rejected.
+
+Run control regression tests with:
+
+```powershell
+.\venv\Scripts\python.exe -m unittest -v test_magic_control
+```
 
 The existing virtual environment and `models/hand_landmarker.task` are required.
 For a fresh environment, use Python 3.11 and install `requirements.txt`.
